@@ -1,0 +1,76 @@
+name: Deploy to GitHub Pages
+
+# Pages serves this site from the gh-pages branch (Pages build type: legacy),
+# so this workflow builds the site and publishes dist/ to that branch.
+on:
+  push:
+    branches: [devin/1775187719-initial-site]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Never let two deploys race to write gh-pages.
+concurrency:
+  group: deploy-gh-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run build
+
+      # The custom domain lives in public/CNAME so that every build reproduces
+      # it. If it ever goes missing, publishing would silently drop the domain
+      # and take the site offline, so fail loudly instead of deploying.
+      - name: Verify CNAME survived the build
+        run: |
+          if [ ! -f dist/CNAME ]; then
+            echo "::error::dist/CNAME is missing - refusing to deploy, this would break the custom domain"
+            exit 1
+          fi
+          echo "dist/CNAME -> $(cat dist/CNAME)"
+
+      - name: Publish dist/ to gh-pages
+        run: |
+          set -euo pipefail
+
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # Keep the deploy history rather than force-pushing a fresh branch.
+          if git ls-remote --exit-code origin gh-pages >/dev/null 2>&1; then
+            git fetch origin gh-pages --depth=1
+            git worktree add ../gh-pages-publish gh-pages
+          else
+            git worktree add --detach ../gh-pages-publish
+            git -C ../gh-pages-publish checkout --orphan gh-pages
+          fi
+
+          # Replace the tree wholesale so deleted files do not linger, but keep
+          # .git itself intact.
+          find ../gh-pages-publish -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R dist/. ../gh-pages-publish/
+
+          cd ../gh-pages-publish
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+
+          git commit -m "Deploy ${GITHUB_SHA::7} from ${GITHUB_REF_NAME}"
+          git push origin gh-pages
